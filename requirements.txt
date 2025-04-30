@@ -1,0 +1,11 @@
+# 项目依赖文件，使用命令 `pip install -r requirements.txt` 来安装所有依赖包
+#  `pip install -r requirements.txt` to install all dependency packages
+
+Flask==2.3.2
+Flask-SQLAlchemy==3.0.5
+Flask-Login==0.6.3
+Werkzeug==2.3.7
+Flask-WTF==1.1.1
+WTForms==3.1.1
+image-captcha==1.1.7
+requests==2.31.0
