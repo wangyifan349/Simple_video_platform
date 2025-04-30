@@ -85,7 +85,7 @@ Simple_video_platform/
 
 ## 📜 许可证
 
-此项目基于BSD 2-Clause License - [查看详细内容](LICENSE)。
+此项目基于BSD 3-Clause License - [查看详细内容](LICENSE)。
 
 ## 🙋‍♂️ 作者
 
