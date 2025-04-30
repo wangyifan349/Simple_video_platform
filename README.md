@@ -1,6 +1,4 @@
 ```markdown
-# Simple_video_platform
-
 ## 视频分享平台
 
 ![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)
