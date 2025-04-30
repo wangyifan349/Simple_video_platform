@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% block title %}注册 - 视频分享平台{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-6 col-lg-5">
+    <h2 class="mb-4 text-center">注册</h2>
+    <form method="POST" novalidate>
+      {{ form.hidden_tag() }}
+
+      <div class="mb-3">
+        {{ form.username.label(class_="form-label") }}
+        {{ form.username(class_="form-control", placeholder="请输入用户名 (3-20字符)") }}
+        {% for err in form.username.errors %}
+          <div class="form-text text-danger">{{ err }}</div>
+        {% endfor %}
+      </div>
+
+      <div class="mb-3">
+        {{ form.password.label(class_="form-label") }}
+        {{ form.password(class_="form-control", placeholder="请输入密码 (6-20字符)") }}
+        {% for err in form.password.errors %}
+          <div class="form-text text-danger">{{ err }}</div>
+        {% endfor %}
+      </div>
+
+      <div class="mb-3">
+        {{ form.password2.label(class_="form-label") }}
+        {{ form.password2(class_="form-control", placeholder="重复密码") }}
+        {% for err in form.password2.errors %}
+          <div class="form-text text-danger">{{ err }}</div>
+        {% endfor %}
+      </div>
+
+      <div class="mb-3">
+        {{ form.captcha.label(class_="form-label") }}
+        <div class="input-group">
+          {{ form.captcha(class_="form-control", placeholder="输入验证码") }}
+          <img src="{{ url_for('get_captcha') }}" alt="验证码" style="cursor:pointer; height:38px;"
+               title="点击刷新验证码"
+               onclick="this.src='{{ url_for('get_captcha') }}?'+Math.random()" />
+        </div>
+        {% for err in form.captcha.errors %}
+          <div class="form-text text-danger">{{ err }}</div>
+        {% endfor %}
+        <div class="form-text">请输入上方验证码 (点击图片刷新)</div>
+      </div>
+
+      <button type="submit" class="btn btn-primary w-100">注册</button>
+    </form>
+    <hr>
+    <p class="text-center">已有账号？<a href="{{ url_for('login') }}">立即登录</a></p>
+  </div>
+</div>
+{% endblock %}
