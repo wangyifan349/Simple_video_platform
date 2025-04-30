@@ -1,19 +1,93 @@
 {% extends 'base.html' %}
+
+<!-- 页面标题块 -->
 {% block title %}{{ user.username }} 的主页 - 视频分享平台{% endblock %}
+
 {% block content %}
+<!-- 用户主页，显示用户名 -->
 <h2 class="mb-4">{{ user.username }} 的主页</h2>
 {% if videos %}
+    <!-- 有视频时，显示视频列表 -->
     <ul class="list-group">
+        <!-- 循环每个视频 -->
         {% for video in videos %}
+        <!-- 每个视频列表项 -->
         <li class="list-group-item d-flex justify-content-between align-items-center">
             <div>
+                <!-- 视频链接，点击播放 -->
                 🎬 
-                <a href="{{ url_for('play_video', video_id=video.id) }}">{{ video.filename.rsplit('/',1)[-1] }}</a>
+                <a href="{{ url_for('play_video', video_id=video.id) }}">
+                    <!-- 显示视频文件名 -->
+                    {{ video.filename.rsplit('/',1)[-1] }}
+                </a>
             </div>
+            <!-- 当用户已登录且为该页面用户时，显示删除按钮 -->
+            {% if current_user.is_authenticated and current_user == user %}
+            <!-- 删除视频按钮 -->
+            <button class="btn btn-sm btn-danger delete-video" 
+                    data-video-id="{{ video.id }}">删除</button>
+            {% endif %}
         </li>
         {% endfor %}
     </ul>
 {% else %}
+    <!-- 当没有视频时，显示提示语 -->
     <p class="text-muted">暂无视频</p>
 {% endif %}
+<!-- ---------------------------------------------------------------------------- -->
+<!-- JavaScript部分，直接嵌入在页面底部，以确保在DOM加载后执行 -->
+<script>
+// 确保DOM加载后运行脚本
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM完全加载，脚本执行中');
+
+    // 查找所有删除按钮
+    const deleteButtons = document.querySelectorAll('.delete-video');
+    console.log(`找到 ${deleteButtons.length} 个删除按钮`);
+
+    deleteButtons.forEach(button => {
+        // 为每个按钮绑定点击事件
+        button.addEventListener('click', function() {
+            console.log('删除按钮被点击');
+            // 提示用户确认删除操作
+            if (!confirm('确认删除该视频吗？此操作不可恢复！')) {
+                console.log('用户取消了删除操作。');
+                return;
+            }
+
+            // 获取视频ID
+            const videoId = this.dataset.videoId;
+            console.log(`尝试删除视频，ID: ${videoId}`);
+
+            // 发送AJAX POST请求以删除视频
+            fetch(`/delete_video/${videoId}`, {
+                method: 'POST', // 使用HTTP POST方法
+                headers: {
+                    'Content-Type': 'application/json'  // 设定请求头为JSON类型
+                },
+                credentials: 'include'  // 包含凭据和会话信息
+            }).then(response => {
+                console.log(`服务器响应状态: ${response.status}`);
+                if (response.ok) {  // 检查响应状态是否为成功
+                    console.log('视频已成功删除');
+                    this.closest('li').remove();  // 从DOM中移除此视频列表项
+                    alert('视频已删除');
+                } else {
+                    console.error('服务器返回错误');
+                    response.text().then(text => {
+                        // 输出错误信息并提示用户
+                        console.error('删除失败原因:', text);
+                        alert('删除失败，请稍后重试：' + text);
+                    });
+                }
+            }).catch(error => {
+                // 捕获并处理请求中的任何错误
+                console.error('删除过程中发生错误:', error);
+                alert('删除过程出现错误，请稍后重试。');
+            });
+        });
+    });
+});
+</script>
+
 {% endblock %}
