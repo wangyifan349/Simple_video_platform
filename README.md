@@ -1,4 +1,3 @@
-
 ```markdown
 # Simple_video_platform
 
@@ -91,6 +90,7 @@ Simple_video_platform/
 ## 🙋‍♂️ 作者
 
 - [Wang Yifan](https://github.com/wangyifan349)
+
 - 邮箱: wangyifangebk@163.com 或 wangyifan1999@protonmail.com
 
 如果您在使用过程中有任何问题或建议，请与我联系。感谢您参与并使用视频分享平台项目！
