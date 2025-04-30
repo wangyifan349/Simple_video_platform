@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block title %}上传视频 - 视频分享平台{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-6 col-lg-5">
+    <h2 class="mb-4 text-center">上传视频</h2>
+    <form method="POST" enctype="multipart/form-data" novalidate>
+      {{ form.hidden_tag() }}
+
+      <div class="mb-3">
+        {{ form.video.label(class_="form-label") }}
+        {{ form.video(class_="form-control") }}
+        {% for err in form.video.errors %}
+          <div class="form-text text-danger">{{ err }}</div>
+        {% endfor %}
+        <div class="form-text">支持格式: mp4, avi, mov, mkv；最大100MB</div>
+      </div>
+
+      <button type="submit" class="btn btn-success w-100">上传</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
