@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}搜索用户 - 视频分享平台{% endblock %}
+{% block content %}
+<h2 class="mb-4">搜索用户</h2>
+<form method="POST" novalidate class="mb-4">
+    {{ form.hidden_tag() }}
+    <div class="input-group">
+        {{ form.keyword(class_="form-control", placeholder="请输入用户名关键字") }}
+        <button class="btn btn-primary" type="submit">{{ form.submit.label.text }}</button>
+    </div>
+    {% for err in form.keyword.errors %}
+        <div class="form-text text-danger">{{ err }}</div>
+    {% endfor %}
+</form>
+
+{% if users %}
+    <ul class="list-group">
+        {% for user in users %}
+        <li class="list-group-item">
+            <a href="{{ url_for('user_profile', username=user.username) }}">{{ user.username }}</a>
+        </li>
+        {% endfor %}
+    </ul>
+{% elif form.is_submitted() %}
+    <p class="text-muted">没有找到相关用户</p>
+{% endif %}
+{% endblock %}
