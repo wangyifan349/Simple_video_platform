@@ -3,7 +3,7 @@
 
 ## 视频分享平台
 
-![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)
+![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.6%2B-blue)
 
 一个简单高效的基于 Flask 开发的视频分享平台！用户可以轻松注册、登录、上传和观看视频。
