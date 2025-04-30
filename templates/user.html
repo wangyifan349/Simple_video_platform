@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}{{ user.username }} 的主页 - 视频分享平台{% endblock %}
+{% block content %}
+<h2 class="mb-4">{{ user.username }} 的主页</h2>
+{% if videos %}
+    <ul class="list-group">
+        {% for video in videos %}
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+            <div>
+                🎬 
+                <a href="{{ url_for('play_video', video_id=video.id) }}">{{ video.filename.rsplit('/',1)[-1] }}</a>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+{% else %}
+    <p class="text-muted">暂无视频</p>
+{% endif %}
+{% endblock %}
