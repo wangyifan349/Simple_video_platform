@@ -1,96 +1,81 @@
 import os
 import re
 import sqlite3
-from flask import (
-    Flask, request, render_template_string, redirect, url_for,
-    flash, session, send_from_directory, g, abort
-)
+import random
+import string
+import io
 from functools import wraps
-
-# =============== 配置 ===============
+from flask import (
+    Flask, request, redirect, url_for,
+    flash, session, send_from_directory, g, abort, make_response,
+    render_template_string
+)
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+# ----------------------------------------
+# 配置项
 DATABASE = 'app.db'
 VIDEO_FOLDER = 'user_videos'
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv'}
-SECRET_KEY = 'your_secret_key_here'  # 生产环境请更换复杂密钥
+SECRET_KEY = 'a_very_secret_key_change_me'  # 记得更换为安全密钥
 
 app = Flask(__name__)
 app.config['DATABASE'] = DATABASE
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['UPLOAD_FOLDER'] = VIDEO_FOLDER
 os.makedirs(VIDEO_FOLDER, exist_ok=True)
-
-# =============== 数据库操作 ===============
-
+# ----------------------------------------
+# 数据库工具函数
 def get_db():
-    """
-    获取数据库连接，绑定到g对象，确保一个请求内复用
-    """
     db = getattr(g, '_database', None)
     if db is None:
         db = g._database = sqlite3.connect(app.config['DATABASE'])
-        db.row_factory = sqlite3.Row  # 方便按列名获取数据
+        db.row_factory = sqlite3.Row
     return db
-
 def init_db():
-    """
-    初始化数据库，创建用户表和视频表
-    """
     db = get_db()
-    # 这里执行建表语句，两个表：
-    # users表存储用户信息，username唯一，password明文（演示用途）
-    # videos表存储视频文件信息，关联user_id
     db.executescript('''
+    -- 用户表，储存每个用户的账号和密码
     CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, -- 用户ID，自增主键
-        username TEXT UNIQUE NOT NULL,         -- 用户名唯一且非空
-        password TEXT NOT NULL                  -- 密码明文存储，生产请加密
+        id INTEGER PRIMARY KEY AUTOINCREMENT,    -- 用户ID，自增主键，唯一标识用户
+        username TEXT UNIQUE NOT NULL,            -- 用户名，唯一且不能为空
+        password TEXT NOT NULL                     -- 密码（演示明文存储，正式请加密）
     );
-
+    -- 视频表，储存用户上传的视频信息
     CREATE TABLE IF NOT EXISTS videos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, -- 视频ID，自增主键
-        user_id INTEGER NOT NULL,              -- 所属用户ID，外键关联users表
-        filename TEXT NOT NULL,                 -- 视频文件名
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- 上传时间默认当前时间
-        FOREIGN KEY(user_id) REFERENCES users(id)        -- 外键约束
+        id INTEGER PRIMARY KEY AUTOINCREMENT,    -- 视频ID，自增主键，唯一标识视频
+        user_id INTEGER NOT NULL,                 -- 所属用户的ID，外键关联users表id
+        filename TEXT NOT NULL,                   -- 视频文件名
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- 上传时间，默认当前时间
+        FOREIGN KEY(user_id) REFERENCES users(id)        -- 外键约束，确保用户存在
     );
     ''')
     db.commit()
 
+
+
 @app.teardown_appcontext
 def close_connection(exception):
-    """
-    请求结束关闭数据库连接
-    """
     db = getattr(g, '_database', None)
     if db is not None:
         db.close()
 
-# =============== 辅助函数 ===============
+# ----------------------------------------
+# 工具函数
 
 def valid_username(username):
-    """
-    验证用户名合法性，允许中英文，数字，下划线，1~20字符
-    """
     return re.fullmatch(r'[\u4e00-\u9fa5A-Za-z0-9_]{1,20}', username) is not None
 
 def allowed_file(filename):
-    """
-    判断文件是否是允许的格式
-    """
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.',1)[1].lower() in ALLOWED_EXTENSIONS
 
 def secure_filename(filename):
-    """
-    简单清理文件名，只允许中文、英文字母、数字、下划线、减号、点
-    """
     filename = filename.strip()
-    parts = filename.rsplit('.', 1)
+    parts = filename.rsplit('.',1)
     if len(parts) == 2:
         name, ext = parts
         ext = ext.lower()
     else:
         name, ext = filename, ''
-    # 替换不允许字符为下划线
     name = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9_\-]', '_', name)
     if ext:
         ext = re.sub(r'[^\w]', '', ext)
@@ -98,24 +83,18 @@ def secure_filename(filename):
     else:
         return name
 
-def lcs_length(s1, s2):
-    """
-    计算两个字符串的最长公共子序列长度 (LCS算法)
-    """
+def lcs_length(s1,s2):
     n, m = len(s1), len(s2)
     dp = [[0]*(m+1) for _ in range(n+1)]
     for i in range(n):
         for j in range(m):
-            if s1[i] == s2[j]:
-                dp[i+1][j+1] = dp[i][j] + 1
+            if s1[i]==s2[j]:
+                dp[i+1][j+1] = dp[i][j]+1
             else:
                 dp[i+1][j+1] = max(dp[i][j+1], dp[i+1][j])
     return dp[n][m]
 
 def search_username_lcs(db, query, limit=5):
-    """
-    使用LCS最长公共子序列算法，搜索最接近query的用户名，返回前limit条结果
-    """
     query = query.strip()
     if not query:
         return []
@@ -125,26 +104,22 @@ def search_username_lcs(db, query, limit=5):
     for user in users:
         score = lcs_length(query, user)
         scored.append((score, user))
-    # 按score降序和用户名升序排序
     scored.sort(key=lambda x: (-x[0], x[1]))
-    return [u for _, u in scored[:limit]]
+    res = []
+    for i in range(min(limit, len(scored))):
+        res.append(scored[i][1])
+    return res
 
 def login_required(f):
-    """
-    登录装饰器，未登录重定向登录页面
-    """
     @wraps(f)
-    def decorated_function(*args, **kwargs):
+    def decor(*args, **kwargs):
         if 'user_id' not in session:
             flash('请先登录', 'warning')
             return redirect(url_for('login'))
         return f(*args, **kwargs)
-    return decorated_function
+    return decor
 
 def current_user_dir():
-    """
-    获取当前登录用户视频目录，确保目录存在
-    """
     username = session.get('username')
     if not username:
         abort(403)
@@ -152,80 +127,141 @@ def current_user_dir():
     os.makedirs(user_dir, exist_ok=True)
     return user_dir
 
-# ==================== 路由视图 ====================
+# ----------------------------------------
+# 验证码处理
+
+def random_captcha_text(length=5):
+    return ''.join(random.choices(string.ascii_letters,k=length))
+
+@app.route('/captcha')
+def captcha():
+    text = random_captcha_text()
+    session['captcha_text'] = text
+
+    width, height = 120, 40
+    image = Image.new('RGB', (width, height), (255,255,255))
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("arial.ttf", 28)
+    except:
+        font = ImageFont.load_default()
+
+    for _ in range(5):
+        start = (random.randint(0,width), random.randint(0,height))
+        end = (random.randint(0,width), random.randint(0,height))
+        draw.line([start,end], fill=(160,160,160), width=1)
+
+    for i, c in enumerate(text):
+        x = 5 + i*22 + random.randint(-2,2)
+        y = 5 + random.randint(-2,2)
+        draw.text((x,y), c, font=font, fill=(0,0,0))
+
+    image = image.filter(ImageFilter.GaussianBlur(1))
+    buf = io.BytesIO()
+    image.save(buf, 'png')
+    buf.seek(0)
+
+    resp = make_response(buf.read())
+    resp.headers['Content-Type'] = 'image/png'
+    resp.headers['Cache-Control'] = 'no-store,no-cache,must-revalidate,max-age=0'
+    return resp
+
+# ----------------------------------------
+# 导航栏HTML字符串（Bootstrap 5响应式）
+
+NAVBAR_HTML = '''
+<nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="/">视频管理系统</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" 
+      data-bs-target="#navbarContent" aria-controls="navbarContent"
+      aria-expanded="false" aria-label="切换导航">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarContent">
+      <form class="d-flex ms-auto me-3" method="get" action="/" >
+        <input class="form-control me-2" type="search" placeholder="搜索用户" aria-label="搜索"
+          name="search" value="{{ search_query|default('') }}">
+        <button class="btn btn-light" type="submit">🔍 搜索</button>
+      </form>
+      <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+        {% if session.get('user_id') %}
+          <li class="nav-item"><a href="/dashboard" class="nav-link">📂 管理视频</a></li>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle" href="#" id="userMenu" role="button" data-bs-toggle="dropdown" aria-expanded="false">{{ session.get('username') }}</a>
+            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userMenu">
+              <li><a class="dropdown-item" href="/logout">退出登录</a></li>
+            </ul>
+          </li>
+        {% else %}
+          <li class="nav-item"><a class="nav-link" href="/login">登录</a></li>
+          <li class="nav-item"><a class="nav-link" href="/register">注册</a></li>
+        {% endif %}
+      </ul>
+    </div>
+  </div>
+</nav>
+'''
+
+# ----------------------------------------
+# 首页：搜索用户，显示搜索结果
 
 @app.route('/')
 def home():
-    query = request.args.get('search', '').strip()
+    search_query = request.args.get('search', '').strip()
     db = get_db()
     users = []
-    if query:
-        users = search_username_lcs(db, query)
-    html = f'''
+    if search_query:
+        users = search_username_lcs(db, search_query)
+
+    # 构造HTML
+    html = '''
     <!doctype html>
     <html lang="zh-CN">
     <head>
-      <meta charset="utf-8">
+      <meta charset="utf-8" />
       <title>首页 - 视频管理系统</title>
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-      <style>body{{padding-top:2rem;}}</style>
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+      <style>body{padding-top:4rem;}</style>
     </head>
     <body>
-    <div class="container">
-
-      <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
-        <div class="container-fluid">
-          <a class="navbar-brand" href="{url_for("home")}">视频管理系统</a>
-          <div class="collapse navbar-collapse">
-            <ul class="navbar-nav ms-auto">
     '''
-    if session.get('username'):
-        html += f'''
-              <li class="nav-item"><a class="nav-link" href="{url_for('dashboard')}">我的空间 ({session['username']})</a></li>
-              <li class="nav-item"><a class="nav-link" href="{url_for('logout')}">退出登录</a></li>
-        '''
-    else:
-        html += f'''
-              <li class="nav-item"><a class="nav-link" href="{url_for('login')}">登录</a></li>
-              <li class="nav-item"><a class="nav-link" href="{url_for('register')}">注册</a></li>
-        '''
+    # 渲染导航栏
+    html += render_template_string(NAVBAR_HTML, search_query=search_query)
+
     html += '''
-            </ul>
-          </div>
-        </div>
-      </nav>
-
+    <div class="container mt-4">
       <h1>搜索用户</h1>
-      <form method="get" action="/" class="mb-4">
-        <div class="input-group">
-          <input type="text" name="search" class="form-control" placeholder="输入用户名搜索" value="{query}">
-          <button class="btn btn-primary" type="submit">搜索</button>
-        </div>
-      </form>
-    '''.format(query=query)
-
-    if query:
+    '''
+    if search_query:
         if users:
-            html += '<h3>搜索结果:</h3><ul class="list-group mb-3">'
+            html += '<div class="list-group">'
             for u in users:
-                html += f'<li class="list-group-item"><a href="{url_for("user_videos", username=u)}">{u}</a></li>'
-            html += '</ul>'
+                html += f'<a href="/user/{u}" class="list-group-item list-group-item-action">{u}</a>'
+            html += '</div>'
         else:
-            html += '<p>没有找到匹配的用户。</p>'
-
+            html += '<p class="text-muted">未找到匹配用户</p>'
+    else:
+        html += '<p class="text-muted">请输入用户名进行搜索</p>'
     html += '''
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    </body>
-    </html>
+    </body></html>
     '''
     return html
 
-@app.route('/register', methods=['GET', 'POST'])
+# ----------------------------------------
+# 注册
+
+@app.route('/register', methods=['GET','POST'])
 def register():
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
+        username = request.form.get('username','').strip()
+        password = request.form.get('password','')
+        captcha_input = request.form.get('captcha','').strip()
+        if captcha_input != session.get('captcha_text',''):
+            flash('验证码错误', 'danger')
+            return redirect(url_for('register'))
         db = get_db()
         if not valid_username(username):
             flash('用户名只能是中英文、数字、下划线，1-20字符', 'danger')
@@ -233,6 +269,7 @@ def register():
         if len(password) < 3:
             flash('密码不能少于3个字符', 'danger')
             return redirect(url_for('register'))
+        # 检查用户名
         if db.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone():
             flash('用户名已存在', 'danger')
             return redirect(url_for('register'))
@@ -244,20 +281,20 @@ def register():
         flash('注册成功，欢迎！', 'success')
         return redirect(url_for('dashboard'))
 
-    # GET 方法显示注册页面
-    return '''
+    html = '''
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <title>注册 - 视频管理系统</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>body{{padding-top:3rem;max-width:400px;margin:auto;}}</style>
+<meta charset="utf-8">
+<title>注册 - 视频管理系统</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+<style>body{padding-top:4rem;max-width:400px;margin:auto;}</style>
 </head>
 <body>
-<div class="container">
-  <h1 class="mb-4">注册</h1>
-  <form method="post">
+''' + NAVBAR_HTML + '''
+<div class="container mt-4">
+  <h1>注册</h1>
+  <form method="post" novalidate>
     <div class="mb-3">
       <label>用户名（中英文、数字、下划线，1-20字符）</label>
       <input type="text" name="username" required class="form-control" pattern="[\u4e00-\u9fa5A-Za-z0-9_]{1,20}" title="中英文、数字、下划线，1-20字符" maxlength="20">
@@ -265,6 +302,13 @@ def register():
     <div class="mb-3">
       <label>密码（至少3字符）</label>
       <input type="password" name="password" required class="form-control" minlength="3">
+    </div>
+    <div class="mb-3">
+      <label>验证码</label>
+      <div class="d-flex align-items-center mb-2">
+        <img src="/captcha" id="captcha_img" style="cursor:pointer;" title="点击刷新验证码" onclick="this.src='/captcha?'+Math.random()">
+      </div>
+      <input type="text" name="captcha" required class="form-control" maxlength="5" minlength="5" pattern="[A-Za-z]{5}" placeholder="请输入验证码" autocomplete="off">
     </div>
     <button type="submit" class="btn btn-success">注册</button>
     <a href="/" class="btn btn-link">返回首页</a>
@@ -274,12 +318,20 @@ def register():
 </body>
 </html>
 '''
+    return html
 
-@app.route('/login', methods=['GET', 'POST'])
+# ----------------------------------------
+# 登录
+
+@app.route('/login', methods=['GET','POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
+        username = request.form.get('username','').strip()
+        password = request.form.get('password','')
+        captcha_input = request.form.get('captcha','').strip()
+        if captcha_input != session.get('captcha_text',''):
+            flash('验证码错误', 'danger')
+            return redirect(url_for('login'))
         db = get_db()
         user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
         if user is None or user['password'] != password:
@@ -290,19 +342,20 @@ def login():
         flash('登录成功！', 'success')
         return redirect(url_for('dashboard'))
 
-    return '''
+    html = '''
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <title>登录 - 视频管理系统</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>body{{padding-top:3rem;max-width:400px;margin:auto;}}</style>
+<meta charset="utf-8">
+<title>登录 - 视频管理系统</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+<style>body{padding-top:4rem;max-width:400px;margin:auto;}</style>
 </head>
 <body>
-<div class="container">
-  <h1 class="mb-4">登录</h1>
-  <form method="post">
+''' + NAVBAR_HTML + '''
+<div class="container mt-4">
+  <h1>登录</h1>
+  <form method="post" novalidate>
     <div class="mb-3">
       <label>用户名</label>
       <input type="text" name="username" required class="form-control" maxlength="20">
@@ -310,6 +363,13 @@ def login():
     <div class="mb-3">
       <label>密码</label>
       <input type="password" name="password" required class="form-control" minlength="3">
+    </div>
+    <div class="mb-3">
+      <label>验证码</label>
+      <div class="d-flex align-items-center mb-2">
+        <img src="/captcha" id="captcha_img" style="cursor:pointer;" title="点击刷新验证码" onclick="this.src='/captcha?'+Math.random()">
+      </div>
+      <input type="text" name="captcha" required class="form-control" maxlength="5" minlength="5" pattern="[A-Za-z]{5}" placeholder="请输入验证码" autocomplete="off">
     </div>
     <button type="submit" class="btn btn-primary">登录</button>
     <a href="/" class="btn btn-link">返回首页</a>
@@ -319,6 +379,10 @@ def login():
 </body>
 </html>
 '''
+    return html
+
+# ----------------------------------------
+# 登出
 
 @app.route('/logout')
 def logout():
@@ -326,12 +390,16 @@ def logout():
     flash('您已退出登录', 'info')
     return redirect(url_for('home'))
 
-@app.route('/dashboard', methods=['GET', 'POST'])
+# ----------------------------------------
+# 个人空间-管理视频（上传、展示、删除）
+
+@app.route('/dashboard', methods=['GET','POST'])
 @login_required
 def dashboard():
     db = get_db()
     user_id = session['user_id']
     username = session['username']
+
     if request.method == 'POST':
         if 'video' not in request.files:
             flash('未上传文件', 'danger')
@@ -353,86 +421,74 @@ def dashboard():
             filepath = os.path.join(user_dir, filename)
             counter += 1
         file.save(filepath)
-        # 数据库插入视频信息
         db.execute('INSERT INTO videos (user_id, filename) VALUES (?, ?)', (user_id, filename))
         db.commit()
-        flash(f'视频“{filename}”上传成功', 'success')
+        flash(f'视频“{filename}”上传成功！', 'success')
         return redirect(url_for('dashboard'))
 
-    # 查询当前用户视频
     videos = db.execute('SELECT id, filename FROM videos WHERE user_id = ? ORDER BY id DESC', (user_id,)).fetchall()
 
-    html = f'''
+    html = '''
 <!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>个人空间 - {username}</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>body{{padding-top:2rem;}}</style>
+<title>管理视频 - ''' + username + '''</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+<style>body{padding-top:4rem;}</style>
 </head>
 <body>
-<div class="container">
+'''
+    html += render_template_string(NAVBAR_HTML, search_query='')
 
-<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="{url_for('home')}">视频管理系统</a>
-    <div class="collapse navbar-collapse">
-      <ul class="navbar-nav ms-auto">
-        <li class="nav-item"><a class="nav-link" href="{url_for('dashboard')}">我的空间 ({username})</a></li>
-        <li class="nav-item"><a class="nav-link" href="{url_for('logout')}">退出登录</a></li>
-      </ul>
+    html += '''
+<div class="container mt-4">
+  <h1>管理视频 - ''' + username + '''</h1>
+  <div class="card mb-4 shadow-sm">
+    <div class="card-header bg-primary text-white">上传新视频</div>
+    <div class="card-body">
+      <form method="post" enctype="multipart/form-data" class="row g-3 align-items-center">
+        <div class="col-auto">
+          <input type="file" name="video" accept="video/*" required class="form-control" />
+        </div>
+        <div class="col-auto">
+          <button type="submit" class="btn btn-success">上传</button>
+        </div>
+      </form>
     </div>
   </div>
-</nav>
-
-<h1>欢迎，{username}</h1>
-
-<div class="card mb-4 shadow-sm">
-  <div class="card-header bg-primary text-white">上传新视频</div>
-  <div class="card-body">
-    <form method="post" enctype="multipart/form-data" class="row g-3 align-items-center">
-      <div class="col-auto">
-        <input type="file" name="video" accept="video/*" class="form-control" required>
-      </div>
-      <div class="col-auto">
-        <button type="submit" class="btn btn-success">上传</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<h2 class="mb-3">我的视频</h2>
+  <h2>我的视频</h2>
 '''
 
-    if videos:
+    if not videos:
+        html += '<p class="text-muted">您还没有上传任何视频。</p>'
+    else:
         html += '<div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">'
+        # 手动循环
         for vid in videos:
             video_url = url_for('serve_video', username=username, filename=vid['filename'])
             download_url = url_for('download_video', username=username, filename=vid['filename'])
             delete_url = url_for('delete_video', video_id=vid['id'])
-            html += f'''
+            html += '''
             <div class="col">
               <div class="card shadow-sm h-100">
-                <video class="card-img-top" controls preload="metadata">
-                  <source src="{video_url}" type="video/mp4">
-                  您的浏览器不支持视频播放。
-                </video>
-                <div class="card-body d-flex flex-column">
-                  <h5 class="card-title text-truncate" title="{vid['filename']}">{vid['filename']}</h5>
-                  <div class="mt-auto d-flex justify-content-between">
-                    <a href="{download_url}" class="btn btn-sm btn-outline-primary" download>下载</a>
-                    <form action="{delete_url}" method="post" onsubmit="return confirm('确定删除视频 {vid["filename"]} 吗？');">
-                      <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
-                    </form>
-                  </div>
+                <a href="''' + url_for('play_video', username=username, filename=vid['filename']) + '''" class="stretched-link text-decoration-none">
+                  <video class="card-img-top" preload="metadata" muted style="height:160px; object-fit:cover;">
+                    <source src="''' + video_url + '''" type="video/mp4" />
+                    您的浏览器不支持视频播放。
+                  </video>
+                </a>
+                <div class="card-body">
+                  <h5 class="card-title text-truncate" title="''' + vid['filename'] + '''">''' + vid['filename'] + '''</h5>
+                  <a href="''' + download_url + '''" class="btn btn-sm btn-outline-primary">下载</a>
+                  <form action="''' + delete_url + '''" method="post" class="d-inline" onsubmit="return confirm('确定删除视频 ''' + vid['filename'] + ''' 吗？');">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
+                  </form>
                 </div>
               </div>
             </div>
             '''
         html += '</div>'
-    else:
-        html += '<p>您还没有上传任何视频。</p>'
 
     html += '''
 </div>
@@ -451,18 +507,19 @@ def delete_video(video_id):
     if not video:
         flash('视频不存在或无权限删除', 'danger')
         return redirect(url_for('dashboard'))
-    filepath = os.path.join(current_user_dir(), video['filename'])
-    if os.path.exists(filepath):
-        os.remove(filepath)
+    fp = os.path.join(current_user_dir(), video['filename'])
+    if os.path.exists(fp):
+        os.remove(fp)
     db.execute('DELETE FROM videos WHERE id = ?', (video_id,))
     db.commit()
     flash(f'视频“{video["filename"]}”已删除', 'success')
     return redirect(url_for('dashboard'))
-
+# ----------------------------------------
+# 用户视频列表页面
 @app.route('/user/<username>')
 def user_videos(username):
     if not valid_username(username):
-        flash('用户名格式不正确', 'danger')
+        flash('用户名格式错误', 'danger')
         return redirect(url_for('home'))
     db = get_db()
     user = db.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone()
@@ -471,67 +528,49 @@ def user_videos(username):
         return redirect(url_for('home'))
     videos = db.execute('SELECT id, filename FROM videos WHERE user_id = ? ORDER BY id DESC', (user['id'],)).fetchall()
 
-    html = f'''
+    html = '''
 <!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>{username} 的视频列表</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>body{{padding-top:2rem;}}</style>
+<title>''' + username + ''' 的视频列表</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+<style>body{padding-top:4rem;}</style>
 </head>
 <body>
-<div class="container">
-
-<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="{url_for('home')}">视频管理系统</a>
-    <div class="collapse navbar-collapse">
-      <ul class="navbar-nav ms-auto">
-    '''
-
-    if session.get('username'):
-        html += f'''
-        <li class="nav-item"><a class="nav-link" href="{url_for('dashboard')}">我的空间 ({session["username"]})</a></li>
-        <li class="nav-item"><a class="nav-link" href="{url_for('logout')}">退出登录</a></li>
-        '''
-    else:
-        html += f'''
-        <li class="nav-item"><a class="nav-link" href="{url_for('login')}">登录</a></li>
-        <li class="nav-item"><a class="nav-link" href="{url_for('register')}">注册</a></li>
-        '''
+'''
+    html += render_template_string(NAVBAR_HTML, search_query='')
 
     html += f'''
-      </ul>
-    </div>
-  </div>
-</nav>
-
-<h1>{username} 的视频列表</h1>
+<div class="container mt-4">
+  <h1>{username} 的视频列表</h1>
 '''
 
-    if videos:
+    if not videos:
+        html += '<p class="text-muted">该用户暂无视频。</p>'
+    else:
         html += '<div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">'
         for vid in videos:
             video_url = url_for('serve_video', username=username, filename=vid['filename'])
             download_url = url_for('download_video', username=username, filename=vid['filename'])
-            html += f'''
+            play_url = url_for('play_video', username=username, filename=vid['filename'])
+            html += '''
             <div class="col">
               <div class="card shadow-sm h-100">
-                <video class="card-img-top" controls preload="metadata">
-                  <source src="{video_url}" type="video/mp4">
-                  您的浏览器不支持视频播放。
-                </video>
-                <div class="card-body d-flex flex-column">
-                  <h5 class="card-title text-truncate" title="{vid['filename']}">{vid['filename']}</h5>
-                  <a href="{download_url}" class="btn btn-sm btn-outline-primary mt-auto" download>下载</a>
+                <a href="''' + play_url + '''" class="stretched-link text-decoration-none">
+                  <video class="card-img-top" preload="metadata" muted style="height:160px; object-fit:cover;">
+                    <source src="''' + video_url + '''" type="video/mp4" />
+                    您的浏览器不支持视频播放。
+                  </video>
+                </a>
+                <div class="card-body">
+                  <h5 class="card-title text-truncate" title="''' + vid['filename'] + '''">''' + vid['filename'] + '''</h5>
+                  <a href="''' + download_url + '''" class="btn btn-sm btn-outline-primary">下载</a>
                 </div>
               </div>
             </div>
             '''
         html += '</div>'
-    else:
-        html += '<p>用户暂无视频。</p>'
 
     html += '''
 </div>
@@ -540,36 +579,80 @@ def user_videos(username):
 </html>
 '''
     return html
+# ----------------------------------------
+# 播放页面单独视频播放
 
+@app.route('/video/<username>/<filename>')
+def play_video(username, filename):
+    if not valid_username(username) or not allowed_file(filename):
+        abort(404)
+    db = get_db()
+    user = db.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone()
+    if not user:
+        flash('用户不存在', 'danger')
+        return redirect(url_for('home'))
+    video_url = url_for('serve_video', username=username, filename=filename)
+    download_url = url_for('download_video', username=username, filename=filename)
+
+    html = '''
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>播放 - ''' + filename + '''</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+<style>body{padding-top:4rem;}</style>
+</head>
+<body>
+'''
+    html += render_template_string(NAVBAR_HTML, search_query='')
+
+    html += f'''
+<main class="container my-4">
+  <h3>{filename}</h3>
+  <p>上传用户：<a href="{ url_for('user_videos', username=username) }">{username}</a></p>
+  <video controls preload="metadata" autoplay style="max-width: 100%; height: auto; display:block; margin-bottom:1rem;">
+    <source src="{video_url}" type="video/mp4" />
+    您的浏览器不支持HTML5视频播放。
+  </video>
+  <a href="{download_url}" class="btn btn-primary" download>下载视频</a>
+  <a href="{url_for('user_videos', username=username)}" class="btn btn-outline-secondary ms-2">返回视频列表</a>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+'''
+    return html
+# ----------------------------------------
+# 视频文件资源与下载
 @app.route('/videos/<username>/<filename>')
 def serve_video(username, filename):
-    if not valid_username(username) or not allowed_file(filename):
+    if not valid_username(username):
+        abort(404)
+    if not allowed_file(filename):
         abort(404)
     path = os.path.join(app.config['UPLOAD_FOLDER'], username)
     return send_from_directory(path, filename)
 
 @app.route('/download/<username>/<filename>')
 def download_video(username, filename):
-    if not valid_username(username) or not allowed_file(filename):
+    if not valid_username(username):
+        abort(404)
+    if not allowed_file(filename):
         abort(404)
     path = os.path.join(app.config['UPLOAD_FOLDER'], username)
     return send_from_directory(path, filename, as_attachment=True)
-
-# =============== 初始化数据库命令 ===============
-
+# ----------------------------------------
+# 初始化数据库命令（flask initdb）
 @app.cli.command('initdb')
 def initdb_command():
-    """
-    命令行初始化数据表，执行 flask initdb
-    """
     init_db()
     print('数据库初始化完成！')
-
-# =============== 主程序入口 ===============
+# ----------------------------------------
+# 程序入口
 
 if __name__ == '__main__':
     if not os.path.exists(DATABASE):
-        print('数据库文件不存在，自动初始化数据库...')
         with app.app_context():
             init_db()
     app.run(debug=True)
