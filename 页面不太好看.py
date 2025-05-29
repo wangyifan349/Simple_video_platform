@@ -82,29 +82,66 @@ def random_captcha_text(length=4):
     chars = string.ascii_letters + string.digits
     return ''.join(random.choices(chars, k=length))
 
+import matplotlib.font_manager as fm
+import os
+import random
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+def find_system_font(font_list=None):
+    # 常见中英文字体，Windows和Linux通用优先顺序
+    if not font_list:
+        font_list = [
+            "Arial.ttf",
+            "Arial",
+            "LiberationSans-Regular.ttf",
+            "DejaVuSans.ttf",
+            "NotoSansCJK-Regular.ttc",
+            "PingFang.ttc",          # macOS字体，可以保留无妨
+            "SimHei.ttf",            # Windows 黑体
+            "Microsoft YaHei.ttf",   # Windows 微软雅黑
+            "STHeiti Medium.ttc"     # macOS 字体
+        ]
+    for font_name in font_list:
+        try:
+            # findfont可能返回默认字体路径，如果不想fallback可设置fallback_to_default=False
+            font_path = fm.findfont(font_name, fallback_to_default=False)
+            if os.path.exists(font_path):
+                return font_path
+        except Exception:
+            # continue trying other fonts
+            continue
+    return None
+
 def create_captcha_image(text):
-    width, height = 100, 40
+    width, height = 200, 80  # 较大尺寸
     image = Image.new('RGB', (width, height), (255, 255, 255))
-    font_path = os.path.join(os.path.dirname(__file__), 'arial.ttf')  # 需要.ttf字体文件，或者用默认
+    font_path = find_system_font()
     try:
-        font = ImageFont.truetype(font_path, 28)
-    except:
+        if font_path:
+            font = ImageFont.truetype(font_path, 48)
+        else:
+            font = ImageFont.load_default()
+    except Exception:
         font = ImageFont.load_default()
     draw = ImageDraw.Draw(image)
-
-    for _ in range(5):
+    # 画多条干扰线
+    for _ in range(10):
         start = (random.randint(0, width), random.randint(0, height))
         end = (random.randint(0, width), random.randint(0, height))
-        color = (random.randint(100,150), random.randint(100,150), random.randint(100,150))
-        draw.line([start, end], fill=color, width=1)
-
+        color = (random.randint(100, 150), random.randint(100, 150), random.randint(100, 150))
+        draw.line([start, end], fill=color, width=2)
+    # 绘制每个字符，随机上下微调，稍微错开x坐标
+    char_width = width // len(text)
     for i, c in enumerate(text):
-        pos = (5 + i*22, random.randint(0, 8))
-        color = (random.randint(0,100), random.randint(0,100), random.randint(0,100))
-        draw.text(pos, c, font=font, fill=color)
-
+        y_offset = random.randint(0, height - 50)
+        x = i * char_width + random.randint(5, 15)
+        color = (random.randint(0, 100), random.randint(0, 100), random.randint(0, 100))
+        draw.text((x, y_offset), c, font=font, fill=color)
     image = image.filter(ImageFilter.EDGE_ENHANCE_MORE)
     return image
+
+
+
 
 @app.route('/captcha')
 def captcha():
