@@ -1851,3 +1851,605 @@ if __name__ == '__main__':
     init_db()
     app.run(debug=False)
 
+
+
+
+
+由于代码一直报错，尝试改写
+import os
+import random
+import sqlite3
+from io import BytesIO
+from functools import wraps
+
+from flask import (
+    Flask, render_template, request, redirect,
+    url_for, flash, session, make_response,
+    jsonify, send_from_directory, abort
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+app = Flask(__name__)
+app.secret_key = 'your_secret_key_change_me'  # 修改成安全值
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DATABASE = os.path.join(BASE_DIR, 'database.db')
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mkv', 'mov'}
+
+app.config.update(
+    DATABASE=DATABASE,
+    UPLOAD_FOLDER=UPLOAD_FOLDER,
+    ALLOWED_VIDEO_EXTENSIONS=ALLOWED_VIDEO_EXTENSIONS,
+    MAX_CONTENT_LENGTH=500 * 1024 * 1024,  # 500MB最大上传限制
+)
+
+# 确保上传目录存在
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# --- 数据库 ---
+def get_db_connection():
+    conn = sqlite3.connect(app.config['DATABASE'])
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS videos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            filename TEXT NOT NULL
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            content TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- 工具函数 ---
+def allowed_video_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_VIDEO_EXTENSIONS']
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'username' not in session:
+            flash('请先登录', 'warning')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# --- 验证码生成 ---
+def generate_captcha_text(length=5):
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    return ''.join(random.choices(chars, k=length))
+
+def load_font(size=40):
+    try:
+        # 直接用系统自带字体，若失败加载Pillow默认字体
+        return ImageFont.truetype("arial.ttf", size)
+    except:
+        return ImageFont.load_default()
+
+def create_captcha_image(text):
+    width, height = 150, 50
+    image = Image.new('RGB', (width, height), (255, 255, 255))
+    font = load_font(40)
+    draw = ImageDraw.Draw(image)
+
+    # 干扰线
+    for _ in range(6):
+        start = (random.randint(0, width), random.randint(0, height))
+        end = (random.randint(0, width), random.randint(0, height))
+        draw.line([start, end], fill=(random.randint(64, 200), 64, 64), width=2)
+
+    # 画验证码字符
+    for i, c in enumerate(text):
+        pos = (10 + i*26, random.randint(5, 15))
+        draw.text(pos, c, fill=(random.randint(32,127), 0, 0), font=font)
+
+    # 锐化边缘
+    image = image.filter(ImageFilter.EDGE_ENHANCE_MORE)
+    return image
+
+@app.route('/captcha')
+def captcha():
+    text = generate_captcha_text()
+    session['captcha_text'] = text.lower()
+    image = create_captcha_image(text)
+    buf = BytesIO()
+    image.save(buf, 'PNG')
+    buf.seek(0)
+    response = make_response(buf.read())
+    response.headers['Content-Type'] = 'image/png'
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
+# --- 用户注册 ---
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if 'username' in session:
+        flash('已登录，请登出后再注册新用户', 'info')
+        return redirect(url_for('videos_upload'))
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        password2 = request.form.get('password2', '')
+        captcha_input = request.form.get('captcha', '').strip().lower()
+        captcha_saved = session.get('captcha_text', '').lower()
+
+        if captcha_input != captcha_saved:
+            flash('验证码错误', 'danger')
+            return redirect(url_for('register'))
+        if not username or not password:
+            flash('用户名和密码不能为空', 'danger')
+            return redirect(url_for('register'))
+        if password != password2:
+            flash('两次密码不一致', 'danger')
+            return redirect(url_for('register'))
+
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM users WHERE username=?', (username,))
+        if c.fetchone():
+            flash('用户名已存在', 'danger')
+            conn.close()
+            return redirect(url_for('register'))
+
+        password_hash = generate_password_hash(password)
+        c.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', (username, password_hash))
+        conn.commit()
+        conn.close()
+        flash('注册成功！请登录。', 'success')
+        return redirect(url_for('login'))
+    return render_template('register.html')
+
+# --- 用户登录 ---
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if 'username' in session:
+        flash('已登录', 'info')
+        return redirect(url_for('videos_upload'))
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        captcha_input = request.form.get('captcha', '').strip().lower()
+        captcha_saved = session.get('captcha_text', '').lower()
+
+        if captcha_input != captcha_saved:
+            flash('验证码错误', 'danger')
+            return redirect(url_for('login'))
+
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT password_hash FROM users WHERE username=?', (username,))
+        row = c.fetchone()
+        conn.close()
+        if not row or not check_password_hash(row['password_hash'], password):
+            flash('用户名或密码错误', 'danger')
+            return redirect(url_for('login'))
+
+        session['username'] = username
+        flash(f'登录成功，欢迎 {username}！', 'success')
+        next_url = request.args.get('next')
+        if next_url:
+            return redirect(next_url)
+        else:
+            return redirect(url_for('videos_upload'))
+    return render_template('login.html')
+
+# --- 用户登出 ---
+@app.route('/logout')
+@login_required
+def logout():
+    session.clear()
+    flash('已退出登录', 'info')
+    return redirect(url_for('login'))
+
+# --- 视频上传 ---
+@app.route('/videos/upload', methods=['GET', 'POST'])
+@login_required
+def videos_upload():
+    username = session['username']
+    if request.method == 'POST':
+        file = request.files.get('file')
+        if not file:
+            flash('没有上传文件', 'danger')
+            return redirect(request.url)
+        if file.filename == '' or not allowed_video_file(file.filename):
+            flash('请选择正确格式的视频文件(mp4, avi, mkv, mov)', 'danger')
+            return redirect(request.url)
+
+        filename = secure_filename(file.filename)
+        base, ext = os.path.splitext(filename)
+        save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        i = 1
+        while os.path.exists(save_path):
+            filename = f"{base}_{i}{ext}"
+            save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            i += 1
+
+        file.save(save_path)
+
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('INSERT INTO videos (username, filename) VALUES (?, ?)', (username, filename))
+        conn.commit()
+        conn.close()
+        flash(f'视频 {filename} 上传成功！', 'success')
+        return redirect(url_for('videos_manage'))
+
+    return render_template('videos_upload.html', username=username)
+
+# --- 视频管理 ---
+@app.route('/videos/manage')
+@login_required
+def videos_manage():
+    username = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT id, filename FROM videos WHERE username = ?', (username,))
+    videos = c.fetchall()
+    conn.close()
+    return render_template('videos_manage.html', videos=videos)
+
+# --- 视频删除 ---
+@app.route('/videos/delete/<int:video_id>', methods=['POST'])
+@login_required
+def videos_delete(video_id):
+    username = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT filename FROM videos WHERE id = ? AND username = ?', (video_id, username))
+    row = c.fetchone()
+    if not row:
+        flash('无权限删除该视频', 'danger')
+        conn.close()
+        return redirect(url_for('videos_manage'))
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], row['filename'])
+    try:
+        os.remove(filepath)
+    except Exception:
+        pass
+    c.execute('DELETE FROM videos WHERE id = ?', (video_id,))
+    conn.commit()
+    conn.close()
+    flash('视频已删除！', 'success')
+    return redirect(url_for('videos_manage'))
+
+# --- 视频播放 ---
+@app.route('/videos/watch/<int:video_id>')
+@login_required
+def videos_watch(video_id):
+    username = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT filename FROM videos WHERE id = ? AND username = ?', (video_id, username))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        flash('视频不存在或无权限查看', 'danger')
+        return redirect(url_for('videos_manage'))
+    return render_template('video_watch.html', filename=row['filename'])
+
+# 视频文件直接访问
+@app.route('/uploads/<filename>')
+@login_required
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+# ----------- 笔记管理 -----------
+
+@app.route('/notes/manage')
+@login_required
+def notes_manage():
+    username = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT id, content FROM notes WHERE username = ?', (username,))
+    notes = c.fetchall()
+    conn.close()
+    return render_template('notes_manage.html', notes=notes)
+
+@app.route('/notes/create', methods=['GET', 'POST'])
+@login_required
+def notes_create():
+    if request.method == 'POST':
+        content = request.form.get('content', '').strip()
+        if not content:
+            flash('笔记内容不能为空', 'danger')
+            return redirect(request.url)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('INSERT INTO notes (username, content) VALUES (?, ?)', (session['username'], content))
+        conn.commit()
+        conn.close()
+        flash('笔记已创建', 'success')
+        return redirect(url_for('notes_manage'))
+    return render_template('note_edit.html', content='')
+
+@app.route('/notes/edit/<int:note_id>', methods=['GET', 'POST'])
+@login_required
+def notes_edit(note_id):
+    username = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT content FROM notes WHERE id = ? AND username = ?', (note_id, username))
+    row = c.fetchone()
+    if not row:
+        flash('无权限编辑该笔记', 'danger')
+        conn.close()
+        return redirect(url_for('notes_manage'))
+    if request.method == 'POST':
+        content = request.form.get('content', '').strip()
+        if not content:
+            flash('笔记内容不能为空', 'danger')
+            conn.close()
+            return redirect(request.url)
+        c.execute('UPDATE notes SET content = ? WHERE id = ?', (content, note_id))
+        conn.commit()
+        conn.close()
+        flash('笔记已更新', 'success')
+        return redirect(url_for('notes_manage'))
+    conn.close()
+    return render_template('note_edit.html', content=row['content'])
+
+@app.route('/notes/delete/<int:note_id>', methods=['POST'])
+@login_required
+def notes_delete(note_id):
+    username = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT id FROM notes WHERE id = ? AND username = ?', (note_id, username))
+    if not c.fetchone():
+        flash('无权限删除该笔记', 'danger')
+        conn.close()
+        return redirect(url_for('notes_manage'))
+    c.execute('DELETE FROM notes WHERE id = ?', (note_id,))
+    conn.commit()
+    conn.close()
+    flash('笔记已删除', 'success')
+    return redirect(url_for('notes_manage'))
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+
+
+
+# 1. templates/base.html （基础布局模板）
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}示例平台{% endblock %}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+  <div class="container">
+    <a class="navbar-brand" href="/">示例平台</a>
+    <div class="collapse navbar-collapse">
+      <ul class="navbar-nav ms-auto">
+        {% if session.get('username') %}
+          <li class="nav-item"><a class="nav-link" href="#">欢迎，{{ session['username'] }}</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('videos_upload') }}">上传视频</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('videos_manage') }}">视频管理</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('notes_manage') }}">笔记管理</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}">退出</a></li>
+        {% else %}
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">登录</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('register') }}">注册</a></li>
+        {% endif %}
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<div class="container mt-4">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, message in messages %}
+      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+        {{ message }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+    {% endfor %}
+  {% endif %}
+  {% endwith %}
+
+  {% block content %}{% endblock %}
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+---
+# 2. templates/register.html （注册页面）
+
+{% extends "base.html" %}
+{% block title %}注册{% endblock %}
+{% block content %}
+<h2>注册</h2>
+<form method="post" autocomplete="off" novalidate>
+  <div class="mb-3">
+    <label for="username" class="form-label">用户名</label>
+    <input type="text" class="form-control" id="username" name="username" required />
+  </div>
+  <div class="mb-3">
+    <label for="password" class="form-label">密码</label>
+    <input type="password" class="form-control" id="password" name="password" required minlength="6" />
+  </div>
+  <div class="mb-3">
+    <label for="password2" class="form-label">确认密码</label>
+    <input type="password" class="form-control" id="password2" name="password2" required minlength="6" />
+  </div>
+  <div class="mb-3">
+    <label for="captcha" class="form-label">验证码</label>
+    <div class="mb-2">
+      <img src="{{ url_for('captcha') }}" alt="验证码" id="captcha_img" style="cursor:pointer;" title="点击刷新验证码" onclick="this.src='{{ url_for('captcha') }}?'+Math.random()"/>
+    </div>
+    <input type="text" class="form-control" id="captcha" name="captcha" maxlength="5" required autocomplete="off" />
+  </div>
+  <button type="submit" class="btn btn-primary">注册</button>
+</form>
+<p class="mt-3">已有账号？ <a href="{{ url_for('login') }}">登录</a></p>
+{% endblock %}
+---
+
+# 3. templates/login.html （登录页面）
+
+{% extends "base.html" %}
+{% block title %}登录{% endblock %}
+{% block content %}
+<h2>登录</h2>
+<form method="post" autocomplete="off" novalidate>
+  <div class="mb-3">
+    <label for="username" class="form-label">用户名</label>
+    <input type="text" class="form-control" id="username" name="username" required />
+  </div>
+  <div class="mb-3">
+    <label for="password" class="form-label">密码</label>
+    <input type="password" class="form-control" id="password" name="password" required />
+  </div>
+  <div class="mb-3">
+    <label for="captcha" class="form-label">验证码</label>
+    <div class="mb-2">
+      <img src="{{ url_for('captcha') }}" alt="验证码" id="captcha_img" style="cursor:pointer;" title="点击刷新验证码" onclick="this.src='{{ url_for('captcha') }}?'+Math.random()"/>
+    </div>
+    <input type="text" class="form-control" id="captcha" name="captcha" maxlength="5" required autocomplete="off" />
+  </div>
+  <button type="submit" class="btn btn-primary">登录</button>
+</form>
+<p class="mt-3">没有账号？ <a href="{{ url_for('register') }}">注册</a></p>
+{% endblock %}
+
+---
+
+# 4. templates/videos_upload.html （视频上传页面）
+
+{% extends "base.html" %}
+{% block title %}上传视频{% endblock %}
+{% block content %}
+<h2>上传视频</h2>
+<form method="post" enctype="multipart/form-data" novalidate>
+  <div class="mb-3">
+    <label for="file" class="form-label">选择视频文件 (mp4, avi, mkv, mov)</label>
+    <input class="form-control" type="file" id="file" name="file" accept="video/mp4,video/x-matroska,video/avi,video/quicktime" required>
+  </div>
+  <button type="submit" class="btn btn-primary">上传</button>
+</form>
+<p class="mt-3"><a href="{{ url_for('videos_manage') }}">查看我的视频</a></p>
+{% endblock %}
+---
+# 5. templates/videos_manage.html （视频管理页面）
+
+{% extends "base.html" %}
+{% block title %}视频管理{% endblock %}
+{% block content %}
+<h2>我的视频</h2>
+<p><a href="{{ url_for('videos_upload') }}" class="btn btn-success mb-3">上传新视频</a></p>
+{% if videos %}
+  <ul class="list-group">
+  {% for video in videos %}
+    <li class="list-group-item d-flex justify-content-between align-items-center">
+      {{ video['filename'] }}
+      <span>
+        <a href="{{ url_for('videos_watch', video_id=video['id']) }}" class="btn btn-primary btn-sm me-2">播放</a>
+        <form method="post" action="{{ url_for('videos_delete', video_id=video['id']) }}" style="display:inline;" onsubmit="return confirm('确认删除该视频吗？');">
+          <button type="submit" class="btn btn-danger btn-sm">删除</button>
+        </form>
+      </span>
+    </li>
+  {% endfor %}
+  </ul>
+{% else %}
+  <p>暂无视频</p>
+{% endif %}
+{% endblock %}
+---
+
+# 6. templates/video_watch.html （视频播放页面）
+
+{% extends "base.html" %}
+{% block title %}播放视频{% endblock %}
+{% block content %}
+<h2>视频播放</h2>
+<video width="720" height="410" controls>
+  <source src="{{ url_for('uploaded_file', filename=filename) }}" type="video/mp4" />
+  你的浏览器不支持视频播放。
+</video>
+<p class="mt-3"><a href="{{ url_for('videos_manage') }}">返回视频管理</a></p>
+{% endblock %}
+---
+
+# 7. templates/notes_manage.html （笔记列表管理页面）
+
+{% extends "base.html" %}
+{% block title %}笔记管理{% endblock %}
+{% block content %}
+<h2>我的笔记</h2>
+<p><a href="{{ url_for('notes_create') }}" class="btn btn-success mb-3">新建笔记</a></p>
+{% if notes %}
+  <ul class="list-group">
+  {% for note in notes %}
+    <li class="list-group-item d-flex justify-content-between align-items-center">
+      {{ note['content'][:50]|e }}{% if note['content']|length > 50 %}...{% endif %}
+      <span>
+        <a href="{{ url_for('notes_edit', note_id=note['id']) }}" class="btn btn-primary btn-sm me-2">编辑</a>
+        <form method="post" action="{{ url_for('notes_delete', note_id=note['id']) }}" style="display:inline;" onsubmit="return confirm('确认删除该笔记吗？');">
+          <button type="submit" class="btn btn-danger btn-sm">删除</button>
+        </form>
+      </span>
+    </li>
+  {% endfor %}
+  </ul>
+{% else %}
+  <p>暂无笔记</p>
+{% endif %}
+{% endblock %}
+---
+
+# 8. templates/note_edit.html （新建/编辑笔记页面）
+
+{% extends "base.html" %}
+{% block title %}{% if content %}编辑笔记{% else %}新建笔记{% endif %}{% endblock %}
+{% block content %}
+<h2>{% if content %}编辑笔记{% else %}新建笔记{% endif %}</h2>
+<form method="post" novalidate>
+  <div class="mb-3">
+    <label for="content" class="form-label">内容</label>
+    <textarea class="form-control" id="content" name="content" rows="8" required>{{ content }}</textarea>
+  </div>
+  <button type="submit" class="btn btn-primary">保存</button>
+  <a href="{{ url_for('notes_manage') }}" class="btn btn-secondary ms-2">取消</a>
+</form>
+{% endblock %}
+
+
+
+这个版本极度精简，可以代替前面那些，那些太多了，改起来比较费劲。
