@@ -1,0 +1,333 @@
+"""
+    系统字体路径一般为 /usr/share/fonts/ 或 /usr/local/share/fonts/
+    用户字体可以放在 ~/.fonts/ 或 ~/.local/share/fonts/
+    安装新字体后，运行 fc-cache -fv 更新字体缓存
+    运行 fc-list : family file 查看所有字体及文件路径
+"""
+
+
+#!/bin/bash
+# install_fonts.sh
+# 这个脚本在Ubuntu系统上安装常用字体包，增强系统字体环境
+# 适合服务器环境，保证验证码和其他中文英文显示字体美观清晰
+
+set -e  # 出错时终止脚本执行
+
+echo "更新apt软件包索引..."
+sudo apt update
+
+echo "安装Google Noto CJK字体，支持中文日文韩文"
+sudo apt install -y fonts-noto-cjk
+
+echo "安装DejaVu字体，开源常用英文字体"
+sudo apt install -y fonts-dejavu-core
+
+echo "安装Liberation字体，兼容微软字体替代方案"
+sudo apt install -y fonts-liberation2
+
+echo "安装Freefont字体集合，覆盖更多字符"
+sudo apt install -y fonts-freefont-ttf
+
+echo "字体安装完成，更新系统字体缓存..."
+sudo fc-cache -fv
+
+echo "字体缓存已刷新。系统字体环境配置完成。"
+
+
+
+
+
+
+
+
+
+import os
+import random
+import sqlite3
+from flask import Flask, request, session, redirect, url_for, flash, g, render_template_string, send_file, make_response
+from werkzeug.security import generate_password_hash, check_password_hash
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+# ----------------------------
+# Flask应用初始化
+# ----------------------------
+app = Flask(__name__)
+app.secret_key = 'your_secret_key_here'  # 请替换成自己的安全密钥
+# SQLite数据库文件
+DATABASE = './users.db'  # 当前目录
+# ----------------------------
+# 字体加载配置
+# ----------------------------
+PROJECT_FONTS = [
+    os.path.join(os.path.dirname(__file__), 'fonts', 'NotoSansCJK-Regular.ttc'),
+    os.path.join(os.path.dirname(__file__), 'fonts', 'DejaVuSans.ttf'),
+]
+def load_font(size=40):
+    """
+    尝试加载项目字体文件，如果无则尝试加载系统字体，
+    最后加载PIL默认字体（最差效果）
+    """
+    for path in PROJECT_FONTS:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    # 简单使用PIL默认字体
+    return ImageFont.load_default()
+# ----------------------------
+# 数据库操作辅助函数
+# ----------------------------
+def get_db():
+    """
+    获取当前请求的数据库连接，保证每次请求共用一个连接
+    """
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE)
+    return db
+@app.teardown_appcontext
+def close_connection(exception):
+    """
+    请求结束时关闭数据库连接
+    """
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
+def init_db():
+    """
+    初始化数据库，创建用户表
+    """
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        # 建表，用户名唯一
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+        ''')
+        db.commit()
+# ----------------------------
+# 验证码生成相关函数
+# ----------------------------
+def create_captcha_text(length=4):
+    """
+    生成一定长度的随机验证码字符串，字符使用数字大写字母
+    """
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    return ''.join(random.choice(chars) for _ in range(length))
+def create_captcha_image(text):
+    """
+    根据验证码文本生成PIL图片，带干扰线和点，字体用load_font加载
+    """
+    width, height = 160, 60
+    image = Image.new('RGB', (width, height), (255, 255, 255))
+    font = load_font(40)
+    draw = ImageDraw.Draw(image)
+    # 画干扰线
+    for _ in range(8):
+        start = (random.randint(0, width), random.randint(0, height))
+        end = (random.randint(0, width), random.randint(0, height))
+        draw.line([start, end], fill=(random.randint(100, 150),)*3, width=2)
+    # 画验证码字符
+    for i, c in enumerate(text):
+        x = 10 + i * 35 + random.randint(-2, 2)
+        y = random.randint(5, 20)
+        # 字体颜色固定用暗红色系，区分度好
+        draw.text((x, y), c, font=font, fill=(random.randint(0, 100), 0, 0))
+    # 边缘增强滤镜，提高清晰度
+    image = image.filter(ImageFilter.EDGE_ENHANCE_MORE)
+    return image
+# ----------------------------
+# Flask路由及业务逻辑
+# ----------------------------
+# 验证码接口，生成图片并返回
+@app.route('/captcha')
+def captcha():
+    text = create_captcha_text()
+    session['captcha_text'] = text.lower()  # 验证码存小写方便比对
+    image = create_captcha_image(text)
+    buf = BytesIO()
+    image.save(buf, 'PNG')
+    buf.seek(0)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    # 禁止缓存，确保每次刷新都新验证码
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
+
+# 注册页面与提交处理
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+        password2 = request.form.get('password2', '').strip()
+
+        # 简单表单验证
+        if not username or not password:
+            flash('用户名和密码不能为空', 'danger')
+        elif password != password2:
+            flash('两次密码输入不匹配', 'danger')
+        else:
+            db = get_db()
+            cursor = db.cursor()
+            # 检查用户名是否存在
+            cursor.execute('SELECT id FROM users WHERE username=?', (username,))
+            if cursor.fetchone():
+                flash('用户名已存在', 'danger')
+            else:
+                # 哈希密码存库
+                hashed_pwd = generate_password_hash(password, method='pbkdf2:sha512', salt_length=16)
+                cursor.execute('INSERT INTO users (username, password) VALUES (?, ?)', (username, hashed_pwd))
+                db.commit()
+                flash('注册成功，请登录', 'success')
+                return redirect(url_for('login'))
+
+    # GET 或出错时显示注册页面，使用Bootstrap 5简易样式
+    return render_template_string('''
+    <!doctype html>
+    <html lang="zh">
+    <head>
+      <meta charset="utf-8">
+      <title>注册</title>
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body>
+    <div class="container mt-5" style="max-width:400px;">
+      <h2 class="mb-4">注册</h2>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, msg in messages %}
+          <div class="alert alert-{{category}}" role="alert">{{ msg }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      <form method="post" novalidate>
+        <div class="mb-3">
+          <label for="username" class="form-label">用户名</label>
+          <input type="text" class="form-control" id="username" name="username" required autofocus>
+        </div>
+        <div class="mb-3">
+          <label for="password" class="form-label">密码</label>
+          <input type="password" class="form-control" id="password" name="password" required>
+        </div>
+        <div class="mb-3">
+          <label for="password2" class="form-label">确认密码</label>
+          <input type="password" class="form-control" id="password2" name="password2" required>
+        </div>
+        <button type="submit" class="btn btn-primary w-100">注册</button>
+      </form>
+      <p class="mt-3">已有账户？ <a href="{{ url_for('login') }}">登录</a></p>
+    </div>
+    </body>
+    </html>
+    ''')
+# 登录页面与提交处理
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+        captcha = request.form.get('captcha', '').strip().lower()
+
+        if 'captcha_text' not in session:
+            flash('验证码已过期，请刷新页面', 'danger')
+        elif captcha != session.get('captcha_text', ''):
+            flash('验证码错误', 'danger')
+        else:
+            db = get_db()
+            cursor = db.cursor()
+            cursor.execute('SELECT password FROM users WHERE username=?', (username,))
+            row = cursor.fetchone()
+            if not row or not check_password_hash(row[0], password):
+                flash('用户名或密码错误', 'danger')
+            else:
+                session.pop('captcha_text', None)  # 验证码正确后清除
+                session['username'] = username     # 登录成功保存用户身份
+                flash('登录成功', 'success')
+                return redirect(url_for('profile'))
+
+    # GET 或出错时渲染登录页，带验证码图片和刷新功能
+    return render_template_string('''
+    <!doctype html>
+    <html lang="zh">
+    <head>
+      <meta charset="utf-8">
+      <title>登录</title>
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+      <style>
+        .captcha-img { cursor:pointer; vertical-align:middle; }
+      </style>
+    </head>
+    <body>
+    <div class="container mt-5" style="max-width:400px;">
+      <h2 class="mb-4">登录</h2>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, msg in messages %}
+          <div class="alert alert-{{category}}" role="alert">{{ msg }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      <form method="post" novalidate>
+        <div class="mb-3">
+          <label for="username" class="form-label">用户名</label>
+          <input type="text" class="form-control" id="username" name="username" required autofocus>
+        </div>
+        <div class="mb-3">
+          <label for="password" class="form-label">密码</label>
+          <input type="password" class="form-control" id="password" name="password" required>
+        </div>
+        <div class="mb-3">
+          <label for="captcha" class="form-label">验证码</label><br>
+          <input type="text" name="captcha" id="captcha" required style="width:110px; display:inline-block; vertical-align:middle;">
+          <img src="{{ url_for('captcha') }}" class="captcha-img" id="captcha_img" title="点击刷新验证码" onclick="this.src='{{ url_for('captcha') }}?t='+Math.random()">
+        </div>
+        <button type="submit" class="btn btn-primary w-100">登录</button>
+      </form>
+      <p class="mt-3">没有账户？ <a href="{{ url_for('register') }}">注册</a></p>
+    </div>
+    </body>
+    </html>
+    ''')
+# 个人主页，展示用户名，登录才能访问
+@app.route('/profile')
+def profile():
+    username = session.get('username')
+    if not username:
+        flash('请先登录', 'warning')
+        return redirect(url_for('login'))
+    return render_template_string('''
+    <!doctype html>
+    <html lang="zh">
+    <head>
+      <meta charset="utf-8">
+      <title>个人主页</title>
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body>
+    <div class="container mt-5" style="max-width:400px;">
+      <h2>欢迎，{{ username }}！</h2>
+      <p><a href="{{ url_for('logout') }}" class="btn btn-outline-danger">退出登录</a></p>
+    </div>
+    </body>
+    </html>
+    ''', username=username)
+# 登出接口，清除会话并跳转登录
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash('已退出登录', 'info')
+    return redirect(url_for('login'))
+# ----------------------------
+# 程序入口：初始化数据库，启动服务
+# ----------------------------
+if __name__ == '__main__':
+    # 启动前初始化数据库（如果还未创建表）
+    init_db()
+    app.run(host='0.0.0.0', port=5000, debug=True)
